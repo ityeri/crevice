@@ -172,3 +172,5 @@ pub mod internal;
 
 mod bool;
 mod imp;
+
+pub use crevice_derive::from_layout;
