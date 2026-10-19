@@ -3,7 +3,7 @@
 ## Unreleased Changes
 * Added `#[crevice(size = ..)]` / `#[crevice(size = .., align = ..)]` field markers. They give the macros the layout of a field at expansion time and are re-checked with compile-time assertions.
 * Added `#[crevice::std140]` and `#[crevice::std430]` attribute macros, which replace the derives and accept a `sort` option that lays fields out by descending alignment.
-* Added a `pad = array|u16|u32|f32` option that selects how padding is written: `array` (the default, `[u8; N]` fields) or one scalar field per chunk, which shader compilers such as naga require in buffer blocks.
+* Added `pad = array|scalar` and `pad_type = u16|u32|f32` options. `array` (the default) writes `[u8; N]` fields; `scalar` writes one field per chunk of `pad_type` (default `u32`), which shader compilers such as naga require in buffer blocks.
 
 ## [0.20.1] - 2026-06-29
 * Fixed version references

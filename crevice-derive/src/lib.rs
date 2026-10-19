@@ -5,6 +5,7 @@ mod layout;
 use proc_macro::TokenStream as CompilerTokenStream;
 
 use quote::quote;
+use syn::spanned::Spanned;
 use syn::{parse_macro_input, DeriveInput, ItemStruct};
 
 const STD140: layout::Options = layout::Options {
@@ -37,7 +38,8 @@ fn expand_attribute(
     options: layout::Options,
 ) -> CompilerTokenStream {
     let mut sort = false;
-    let mut pad: Option<layout::Pad> = None;
+    let mut pad_mode: Option<(PadMode, proc_macro2::Span)> = None;
+    let mut pad_type: Option<(layout::ScalarPad, proc_macro2::Span)> = None;
     let parser = syn::meta::parser(|meta| {
         if meta.path.is_ident("sort") {
             if sort {
@@ -46,17 +48,38 @@ fn expand_attribute(
             sort = true;
             Ok(())
         } else if meta.path.is_ident("pad") {
-            if pad.is_some() {
+            if pad_mode.is_some() {
                 return Err(meta.error("duplicate `pad` option"));
             }
-            pad = Some(parse_padding(&meta)?);
+            pad_mode = Some((parse_pad_mode(&meta)?, meta.path.span()));
+            Ok(())
+        } else if meta.path.is_ident("pad_type") {
+            if pad_type.is_some() {
+                return Err(meta.error("duplicate `pad_type` option"));
+            }
+            pad_type = Some((parse_pad_type(&meta)?, meta.path.span()));
             Ok(())
         } else {
-            Err(meta.error("unsupported option, expected `sort` or `pad`"))
+            Err(meta.error("unsupported option, expected `sort`, `pad` or `pad_type`"))
         }
     });
     parse_macro_input!(args with parser);
-    let pad = pad.unwrap_or(layout::Pad::Array);
+
+    let pad = match (pad_mode, pad_type) {
+        (None, None) | (Some((PadMode::Array, _)), None) => layout::Pad::Array,
+        (Some((PadMode::Array, _)), Some((_, span))) => {
+            return syn::Error::new(span, "`pad_type` is only used with `pad = scalar`")
+                .to_compile_error()
+                .into()
+        }
+        (None, Some((_, span))) => {
+            return syn::Error::new(span, "`pad_type` requires `pad = scalar`")
+                .to_compile_error()
+                .into()
+        }
+        (Some((PadMode::Scalar, _)), Some((scalar, _))) => layout::Pad::Scalar(scalar),
+        (Some((PadMode::Scalar, _)), None) => layout::Pad::Scalar(DEFAULT_PAD_TYPE),
+    };
 
     let mut item_struct = parse_macro_input!(item as ItemStruct);
 
@@ -82,17 +105,46 @@ fn expand_attribute(
     .into()
 }
 
-/// Reads `pad = u16` (or `pad = "u16"`) into a scalar padding type.
-fn parse_padding(meta: &syn::meta::ParseNestedMeta<'_>) -> syn::Result<layout::Pad> {
+/// How padding is represented: `array` keeps `[u8; N]` fields, `scalar` writes
+/// one field per chunk.
+#[derive(Clone, Copy)]
+enum PadMode {
+    Array,
+    Scalar,
+}
+
+/// Padding type used by `pad = scalar` when `pad_type` is not given.
+const DEFAULT_PAD_TYPE: layout::ScalarPad = layout::ScalarPad {
+    name: "u32",
+    size: 4,
+    align: 4,
+};
+
+fn option_value(meta: &syn::meta::ParseNestedMeta<'_>) -> syn::Result<String> {
     let value = meta.value()?;
-    let name = if value.peek(syn::LitStr) {
-        value.parse::<syn::LitStr>()?.value()
+    if value.peek(syn::LitStr) {
+        Ok(value.parse::<syn::LitStr>()?.value())
     } else {
-        value.parse::<syn::Ident>()?.to_string()
-    };
+        Ok(value.parse::<syn::Ident>()?.to_string())
+    }
+}
+
+fn parse_pad_mode(meta: &syn::meta::ParseNestedMeta<'_>) -> syn::Result<PadMode> {
+    let name = option_value(meta)?;
+
+    match name.as_str() {
+        "array" => Ok(PadMode::Array),
+        "scalar" => Ok(PadMode::Scalar),
+        other => Err(meta.error(format!(
+            "unsupported padding mode `{other}`, expected `array` or `scalar`"
+        ))),
+    }
+}
+
+fn parse_pad_type(meta: &syn::meta::ParseNestedMeta<'_>) -> syn::Result<layout::ScalarPad> {
+    let name = option_value(meta)?;
 
     let scalar = match name.as_str() {
-        "array" => return Ok(layout::Pad::Array),
         "u16" => layout::ScalarPad {
             name: "u16",
             size: 2,
@@ -110,12 +162,12 @@ fn parse_padding(meta: &syn::meta::ParseNestedMeta<'_>) -> syn::Result<layout::P
         },
         other => {
             return Err(meta.error(format!(
-                "unsupported padding type `{other}`, expected `array`, `u16`, `u32` or `f32`"
+                "unsupported padding type `{other}`, expected `u16`, `u32` or `f32`"
             )))
         }
     };
 
-    Ok(layout::Pad::Scalar(scalar))
+    Ok(scalar)
 }
 
 fn derive_input_of(item_struct: &ItemStruct) -> DeriveInput {
@@ -167,20 +219,21 @@ pub fn derive_as_std430(input: CompilerTokenStream) -> CompilerTokenStream {
 ///
 /// * `sort`: lay fields out by descending alignment, which removes padding that
 ///   the declaration order would otherwise introduce.
-/// * `pad = array|u16|u32|f32`: how padding is represented. The default is
-///   `array`, which writes `[u8; N]` fields. A scalar type writes one field per
-///   scalar chunk instead (see below). `pad = array` is accepted so the mode can
-///   be spelled out explicitly. Shader compilers such as naga reject byte arrays in
-///   buffer blocks, so this is the mode to use when the generated struct is
+/// * `pad = array|scalar`: how padding is represented. `array` (the default)
+///   writes `[u8; N]` fields, `scalar` writes one field per chunk of the
+///   selected padding type.
+/// * `pad_type = u16|u32|f32`: padding type for `pad = scalar`, `u32` by
+///   default. Shader compilers such as naga reject byte arrays in buffer
+///   blocks, so scalar padding is the mode to use when the generated struct is
 ///   also the shader type. `u16` padding needs an even padding length and a
 ///   shader compiler that accepts 16-bit integers in buffer blocks
-///   (`SHADER_INT16` in naga); `u32` and `f32` padding fit every layout without
-///   extra capabilities. Padding that cannot be covered exactly, or that starts
-///   at an offset which is not a multiple of the type's alignment, is rejected
-///   with a compile error.
+///   (`SHADER_INT16` in naga); `u32` and `f32` fit every layout without extra
+///   capabilities. Padding that cannot be covered exactly, or that starts at an
+///   offset which is not a multiple of the type's alignment, is rejected with a
+///   compile error.
 ///
-/// Both options require a known size for every field, so fields whose size
-/// cannot be inferred need `#[crevice(size = ..)]`.
+/// `sort` and `pad = scalar` require a known size for every field, so fields
+/// whose size cannot be inferred need `#[crevice(size = ..)]`.
 #[proc_macro_attribute]
 pub fn std140(args: CompilerTokenStream, item: CompilerTokenStream) -> CompilerTokenStream {
     expand_attribute(args, item, STD140)

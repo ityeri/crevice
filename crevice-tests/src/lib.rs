@@ -562,7 +562,7 @@ fn scalar_padding_matches_array_padding() {
         inner: Inner,
     }
 
-    #[crevice::std140(pad = u16)]
+    #[crevice::std140(pad = scalar, pad_type = u16)]
     struct ScalarPadded {
         #[crevice(size = 8)]
         resolution: Vector2<f32>,
@@ -596,7 +596,7 @@ fn scalar_padding_matches_array_padding() {
 
 #[test]
 fn scalar_padding_u16_on_two_byte_offsets() {
-    #[crevice::std140(pad = u16)]
+    #[crevice::std140(pad = scalar, pad_type = u16)]
     struct TwoByteFirst {
         #[crevice(size = 2, align = 2)]
         half: Half,
@@ -619,7 +619,7 @@ fn scalar_padding_accepts_string_types() {
         b: f32,
     }
 
-    #[crevice::std140(pad = "u32")]
+    #[crevice::std140(pad = "scalar", pad_type = "u32")]
     struct StrForm {
         #[crevice(size = 16)]
         inner: Inner,
@@ -635,7 +635,7 @@ fn scalar_padding_accepts_string_types() {
 
 #[test]
 fn scalar_padding_with_sort() {
-    #[crevice::std430(sort, pad = f32)]
+    #[crevice::std430(sort, pad = scalar, pad_type = f32)]
     struct Repacked {
         a: f32,
         #[crevice(size = 8)]
@@ -696,4 +696,39 @@ fn explicit_array_padding_matches_default() {
 
     assert_eq!(default_value.as_bytes(), explicit_value.as_bytes());
     assert_eq!(default_value.as_bytes(), string_value.as_bytes());
+}
+
+#[test]
+fn scalar_padding_defaults_to_u32() {
+    #[derive(AsStd140)]
+    struct Inner {
+        a: f32,
+        b: f32,
+    }
+
+    #[crevice::std140(pad = scalar)]
+    struct DefaultType {
+        #[crevice(size = 16)]
+        inner: Inner,
+        #[crevice(size = 4)]
+        x: f32,
+    }
+
+    #[crevice::std140(pad = scalar, pad_type = u32)]
+    struct ExplicitType {
+        #[crevice(size = 16)]
+        inner: Inner,
+        #[crevice(size = 4)]
+        x: f32,
+    }
+
+    assert_std140!((size = 32, align = 16) DefaultType {
+        inner: 0,
+        x: 16,
+    });
+
+    let default_value = DefaultType { inner: Inner { a: 1.0, b: 2.0 }, x: 3.0 }.as_std140();
+    let explicit_value = ExplicitType { inner: Inner { a: 1.0, b: 2.0 }, x: 3.0 }.as_std140();
+
+    assert_eq!(default_value.as_bytes(), explicit_value.as_bytes());
 }
