@@ -4,6 +4,25 @@ use syn::{parse_quote, Data, DeriveInput, Field, Fields, Ident, LitStr, Path, Re
 
 use crate::field::{self, Marked};
 
+/// How the padding between fields is represented in the generated struct.
+#[derive(Clone, Copy)]
+pub enum Pad {
+    /// `[u8; N]`, the historical representation. Works without knowing field
+    /// sizes at expansion time, but shader compilers may reject byte arrays.
+    Array,
+    /// One field per scalar chunk, e.g. `u16` padding of 8 bytes becomes four
+    /// `u16` fields.
+    Scalar(ScalarPad),
+}
+
+/// A scalar type usable for padding.
+#[derive(Clone, Copy)]
+pub struct ScalarPad {
+    pub name: &'static str,
+    pub size: usize,
+    pub align: usize,
+}
+
 /// Options shared by the derive and attribute entry points.
 pub struct Options {
     pub trait_name: &'static str,
@@ -11,6 +30,7 @@ pub struct Options {
     pub min_struct_alignment: usize,
     /// Sort fields by descending alignment (then size) before laying them out.
     pub sort: bool,
+    pub pad: Pad,
 }
 
 struct FieldInfo<'a> {
@@ -22,12 +42,20 @@ struct FieldInfo<'a> {
     resolved: Option<Marked>,
 }
 
+/// Offsets and sizes the generated padding produces.
+struct NumericLayout {
+    offsets: Vec<usize>,
+    pads: Vec<usize>,
+    size: usize,
+}
+
 pub fn emit(input: DeriveInput, options: Options) -> Result<TokenStream> {
     let Options {
         trait_name,
         mod_name,
         min_struct_alignment,
         sort,
+        pad,
     } = options;
 
     let mod_name = Ident::new(mod_name, Span::call_site());
@@ -92,23 +120,91 @@ pub fn emit(input: DeriveInput, options: Options) -> Result<TokenStream> {
         })
         .collect::<Result<_>>()?;
 
-    if sort {
+    // Sorting and scalar padding both need a known size for every field.
+    let needs_known_layout = sort || matches!(pad, Pad::Scalar(_));
+
+    if needs_known_layout {
         if let Some(unknown) = infos.iter().find(|info| info.resolved.is_none()) {
             let name = unknown.name;
+            let feature = match (sort, matches!(pad, Pad::Array)) {
+                (true, false) => "`sort` and scalar padding need",
+                (true, true) => "`sort` needs",
+                (false, _) => "scalar padding needs",
+            };
             let message = format!(
-                "`sort` needs the layout size of every field at macro expansion time, \
+                "{feature} the layout size of every field at macro expansion time, \
                  but `{name}` has none; add `#[crevice(size = ..)]` to it"
             );
             return Err(syn::Error::new_spanned(unknown.field, message));
         }
+    }
 
+    if sort {
         infos.sort_by_key(|info| {
             let marked = info.resolved.expect("`sort` checked every field above");
-            (std::cmp::Reverse(marked.align), std::cmp::Reverse(marked.size))
+            (
+                std::cmp::Reverse(marked.align),
+                std::cmp::Reverse(marked.size),
+            )
         });
     }
 
     let field_count = infos.len();
+
+    let sizes: Option<Vec<usize>> = infos
+        .iter()
+        .map(|info| info.resolved.map(|marked| marked.size))
+        .collect();
+    let aligns: Option<Vec<usize>> = infos
+        .iter()
+        .map(|info| info.resolved.map(|marked| marked.align))
+        .collect();
+
+    let numeric = match (&sizes, &aligns) {
+        (Some(sizes), Some(aligns)) => Some(numeric_layout(
+            sizes,
+            aligns,
+            min_struct_alignment,
+        )),
+        _ => None,
+    };
+
+    if let (Pad::Scalar(scalar), Some(numeric)) = (pad, numeric.as_ref()) {
+        for (index, info) in infos.iter().enumerate() {
+            let pad_bytes = numeric.pads[index];
+            if pad_bytes == 0 {
+                continue;
+            }
+
+            let pad_start = numeric.offsets[index] + sizes.as_ref().unwrap()[index];
+            let name = info.name;
+
+            if pad_bytes % scalar.size != 0 {
+                let suggestion = if pad_bytes % 4 == 0 {
+                    "use `u32` or `f32` padding instead"
+                } else {
+                    "use the default `[u8; N]` padding"
+                };
+                let message = format!(
+                    "padding of {pad_bytes} bytes after `{name}` cannot be filled with \
+                     {size}-byte `{ty}` padding; {suggestion}",
+                    size = scalar.size,
+                    ty = scalar.name,
+                );
+                return Err(syn::Error::new_spanned(info.field, message));
+            }
+
+            if pad_start % scalar.align != 0 {
+                let message = format!(
+                    "padding after `{name}` starts at offset {pad_start}, which is not aligned to \
+                     the {align}-byte alignment of `{ty}` padding; use the default `[u8; N]` padding",
+                    align = scalar.align,
+                    ty = scalar.name,
+                );
+                return Err(syn::Error::new_spanned(info.field, message));
+            }
+        }
+    }
 
     let layout_version_of_ty = |ty: &Type| {
         quote! {
@@ -181,38 +277,44 @@ pub fn emit(input: DeriveInput, options: Options) -> Result<TokenStream> {
         output.into_iter().collect::<TokenStream>()
     };
 
-    let pad_fn_impls: TokenStream = pad_fns
-        .iter()
-        .enumerate()
-        .map(|(index, pad_fn)| {
-            let starting_offset = offset_after_field(index);
+    let array_padding = matches!(pad, Pad::Array);
 
-            let next_field_or_self_alignment = infos
-                .get(index + 1)
-                .map(&alignment_of_field)
-                .unwrap_or(quote!(#struct_alignment));
+    let pad_fn_impls: TokenStream = if array_padding {
+        pad_fns
+            .iter()
+            .enumerate()
+            .map(|(index, pad_fn)| {
+                let starting_offset = offset_after_field(index);
 
-            quote! {
-                /// Tells how many bytes of padding have to be inserted after
-                /// the field with index #index.
-                #[allow(non_snake_case)]
-                const fn #pad_fn() -> usize {
-                    // First up, calculate our offset into the struct so far.
-                    // We'll use this value to figure out how far out of
-                    // alignment we are.
-                    let starting_offset = #starting_offset;
+                let next_field_or_self_alignment = infos
+                    .get(index + 1)
+                    .map(&alignment_of_field)
+                    .unwrap_or(quote!(#struct_alignment));
 
-                    // We set our target alignment to the larger of the
-                    // alignment due to the previous field and the alignment
-                    // requirement of the next field.
-                    let alignment = #next_field_or_self_alignment;
+                quote! {
+                    /// Tells how many bytes of padding have to be inserted after
+                    /// the field with index #index.
+                    #[allow(non_snake_case)]
+                    const fn #pad_fn() -> usize {
+                        // First up, calculate our offset into the struct so far.
+                        // We'll use this value to figure out how far out of
+                        // alignment we are.
+                        let starting_offset = #starting_offset;
 
-                    // Using everything we've got, compute our padding amount.
-                    ::crevice::internal::align_offset(starting_offset, alignment)
+                        // We set our target alignment to the larger of the
+                        // alignment due to the previous field and the alignment
+                        // requirement of the next field.
+                        let alignment = #next_field_or_self_alignment;
+
+                        // Using everything we've got, compute our padding amount.
+                        ::crevice::internal::align_offset(starting_offset, alignment)
+                    }
                 }
-            }
-        })
-        .collect();
+            })
+            .collect()
+    } else {
+        quote!()
+    };
 
     let generated_struct_fields: TokenStream = infos
         .iter()
@@ -221,12 +323,26 @@ pub fn emit(input: DeriveInput, options: Options) -> Result<TokenStream> {
             let field_name = info.name;
             let field_vis = &info.field.vis;
             let field_ty = layout_version_of_ty(&info.field.ty);
-            let pad_field_name = format_ident!("_pad{}", index);
-            let pad_fn = &pad_fns[index];
 
-            quote! {
-                #field_vis #field_name: #field_ty,
-                #pad_field_name: [u8; #pad_fn()],
+            match pad {
+                Pad::Array => {
+                    let pad_field_name = format_ident!("_pad{}", index);
+                    let pad_fn = &pad_fns[index];
+
+                    quote! {
+                        #field_vis #field_name: #field_ty,
+                        #pad_field_name: [u8; #pad_fn()],
+                    }
+                }
+                Pad::Scalar(scalar) => {
+                    let pad_ty = Ident::new(scalar.name, Span::call_site());
+                    let pad_fields = scalar_pad_fields(index, scalar, numeric.as_ref());
+
+                    quote! {
+                        #field_vis #field_name: #field_ty,
+                        #(#pad_fields: #pad_ty,)*
+                    }
+                }
             }
         })
         .collect();
@@ -317,15 +433,12 @@ pub fn emit(input: DeriveInput, options: Options) -> Result<TokenStream> {
             });
         }
 
-        let all_known: Option<Vec<Marked>> = infos.iter().map(|info| info.resolved).collect();
-
-        if let Some(marked) = all_known {
-            let sizes: Vec<usize> = marked.iter().map(|marked| marked.size).collect();
-            let aligns: Vec<usize> = marked.iter().map(|marked| marked.align).collect();
-            let (_, total, _) = numeric_layout(&sizes, &aligns, min_struct_alignment);
+        if let Some(numeric) = numeric.as_ref() {
+            let total = numeric.size;
             let size_message = LitStr::new(
                 &format!(
-                    "`{generated_name}` size does not match the computed layout ({total} bytes                      from the field sizes and alignments)"
+                    "`{generated_name}` size does not match the computed layout ({total} bytes \
+                     from the field sizes and alignments)"
                 ),
                 Span::call_site(),
             );
@@ -436,32 +549,50 @@ pub fn emit(input: DeriveInput, options: Options) -> Result<TokenStream> {
     })
 }
 
-/// Offsets and total size the generated padding functions produce.
+/// Names of the scalar fields that cover the padding after a field.
+fn scalar_pad_fields(index: usize, scalar: ScalarPad, numeric: Option<&NumericLayout>) -> Vec<Ident> {
+    // Callers reject scalar padding unless every field size is known.
+    let Some(numeric) = numeric else {
+        unreachable!("scalar padding requires a fully known layout");
+    };
+
+    let pad_bytes = numeric.pads[index];
+    let count = pad_bytes / scalar.size;
+
+    (0..count)
+        .map(|chunk| format_ident!("_pad{}_{}", index, chunk))
+        .collect()
+}
+
+/// Offsets, padding and total size the generated layout produces.
 ///
-/// Only usable when every field size is known at expansion time; the caller
-/// emits an assertion comparing this against the real struct size.
-fn numeric_layout(
-    sizes: &[usize],
-    aligns: &[usize],
-    min_struct_alignment: usize,
-) -> (Vec<usize>, usize, usize) {
-    let struct_alignment = aligns
+/// Only usable when every field size is known at expansion time. The caller
+/// emits an assertion comparing the total size against the real struct size.
+fn numeric_layout(sizes: &[usize], aligns: &[usize], min_struct_alignment: usize) -> NumericLayout {
+    let alignment = aligns
         .iter()
         .copied()
         .fold(min_struct_alignment, usize::max);
 
     let mut offsets = Vec::with_capacity(sizes.len());
+    let mut pads = Vec::with_capacity(sizes.len());
     let mut offset = 0usize;
 
     for index in 0..sizes.len() {
         offsets.push(offset);
         offset += sizes[index];
 
-        let next_alignment = aligns.get(index + 1).copied().unwrap_or(struct_alignment);
-        offset = align_up(offset, next_alignment);
+        let next_alignment = aligns.get(index + 1).copied().unwrap_or(alignment);
+        let padded = align_up(offset, next_alignment);
+        pads.push(padded - offset);
+        offset = padded;
     }
 
-    (offsets, offset, struct_alignment)
+    NumericLayout {
+        offsets,
+        pads,
+        size: offset,
+    }
 }
 
 fn align_up(value: usize, alignment: usize) -> usize {
