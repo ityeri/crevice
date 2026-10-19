@@ -652,3 +652,48 @@ fn scalar_padding_with_sort() {
         c: 20,
     });
 }
+
+#[test]
+fn explicit_array_padding_matches_default() {
+    #[derive(AsStd140)]
+    struct Inner {
+        a: f32,
+        b: f32,
+    }
+
+    #[crevice::std140]
+    struct DefaultMode {
+        #[crevice(size = 16)]
+        inner: Inner,
+        #[crevice(size = 4)]
+        x: f32,
+    }
+
+    #[crevice::std140(pad = array)]
+    struct ExplicitMode {
+        #[crevice(size = 16)]
+        inner: Inner,
+        #[crevice(size = 4)]
+        x: f32,
+    }
+
+    #[crevice::std140(pad = "array")]
+    struct StringMode {
+        #[crevice(size = 16)]
+        inner: Inner,
+        #[crevice(size = 4)]
+        x: f32,
+    }
+
+    assert_std140!((size = 32, align = 16) ExplicitMode {
+        inner: 0,
+        x: 16,
+    });
+
+    let default_value = DefaultMode { inner: Inner { a: 1.0, b: 2.0 }, x: 3.0 }.as_std140();
+    let explicit_value = ExplicitMode { inner: Inner { a: 1.0, b: 2.0 }, x: 3.0 }.as_std140();
+    let string_value = StringMode { inner: Inner { a: 1.0, b: 2.0 }, x: 3.0 }.as_std140();
+
+    assert_eq!(default_value.as_bytes(), explicit_value.as_bytes());
+    assert_eq!(default_value.as_bytes(), string_value.as_bytes());
+}

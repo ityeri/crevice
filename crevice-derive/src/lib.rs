@@ -37,7 +37,7 @@ fn expand_attribute(
     options: layout::Options,
 ) -> CompilerTokenStream {
     let mut sort = false;
-    let mut pad = layout::Pad::Array;
+    let mut pad: Option<layout::Pad> = None;
     let parser = syn::meta::parser(|meta| {
         if meta.path.is_ident("sort") {
             if sort {
@@ -46,16 +46,17 @@ fn expand_attribute(
             sort = true;
             Ok(())
         } else if meta.path.is_ident("pad") {
-            if !matches!(pad, layout::Pad::Array) {
+            if pad.is_some() {
                 return Err(meta.error("duplicate `pad` option"));
             }
-            pad = parse_padding(&meta)?;
+            pad = Some(parse_padding(&meta)?);
             Ok(())
         } else {
             Err(meta.error("unsupported option, expected `sort` or `pad`"))
         }
     });
     parse_macro_input!(args with parser);
+    let pad = pad.unwrap_or(layout::Pad::Array);
 
     let mut item_struct = parse_macro_input!(item as ItemStruct);
 
@@ -91,6 +92,7 @@ fn parse_padding(meta: &syn::meta::ParseNestedMeta<'_>) -> syn::Result<layout::P
     };
 
     let scalar = match name.as_str() {
+        "array" => return Ok(layout::Pad::Array),
         "u16" => layout::ScalarPad {
             name: "u16",
             size: 2,
@@ -108,7 +110,7 @@ fn parse_padding(meta: &syn::meta::ParseNestedMeta<'_>) -> syn::Result<layout::P
         },
         other => {
             return Err(meta.error(format!(
-                "unsupported padding type `{other}`, expected `u16`, `u32` or `f32`"
+                "unsupported padding type `{other}`, expected `array`, `u16`, `u32` or `f32`"
             )))
         }
     };
@@ -165,8 +167,10 @@ pub fn derive_as_std430(input: CompilerTokenStream) -> CompilerTokenStream {
 ///
 /// * `sort`: lay fields out by descending alignment, which removes padding that
 ///   the declaration order would otherwise introduce.
-/// * `pad = u16|u32|f32`: express padding as scalar fields of that type instead
-///   of `[u8; N]` arrays. Shader compilers such as naga reject byte arrays in
+/// * `pad = array|u16|u32|f32`: how padding is represented. The default is
+///   `array`, which writes `[u8; N]` fields. A scalar type writes one field per
+///   scalar chunk instead (see below). `pad = array` is accepted so the mode can
+///   be spelled out explicitly. Shader compilers such as naga reject byte arrays in
 ///   buffer blocks, so this is the mode to use when the generated struct is
 ///   also the shader type. `u16` padding needs an even padding length and a
 ///   shader compiler that accepts 16-bit integers in buffer blocks
