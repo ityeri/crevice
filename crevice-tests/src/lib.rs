@@ -353,3 +353,184 @@ fn bools_and_bool_vectors() {
         y: 8,
     });
 }
+
+#[test]
+fn attribute_macro_matches_derive() {
+    #[derive(AsStd140)]
+    struct Derived {
+        x: f32,
+        y: Vector2<f32>,
+    }
+
+    #[crevice::std140]
+    struct Attributed {
+        x: f32,
+        y: Vector2<f32>,
+    }
+
+    assert_std140!((size = 16, align = 16) Derived {
+        x: 0,
+        y: 8,
+    });
+
+    assert_std140!((size = 16, align = 16) Attributed {
+        x: 0,
+        y: 8,
+    });
+}
+
+#[test]
+fn manual_field_size_uses_derived_alignment() {
+    #[derive(AsStd140)]
+    struct Inner {
+        a: f32,
+        b: f32,
+    }
+
+    #[crevice::std140]
+    struct Outer {
+        #[crevice(size = 16)]
+        inner: Inner,
+        x: f32,
+    }
+
+    assert_std140!((size = 32, align = 16) Outer {
+        inner: 0,
+        x: 16,
+    });
+}
+
+#[test]
+fn manual_field_size_on_inferable_field() {
+    #[crevice::std140]
+    struct Marked {
+        #[crevice(size = 4)]
+        x: f32,
+        #[crevice(size = 8)]
+        y: Vector2<f32>,
+    }
+
+    assert_std140!((size = 16, align = 16) Marked {
+        x: 0,
+        y: 8,
+    });
+}
+
+#[test]
+fn manual_field_align_overrides_derived_value() {
+    // std430 structs of scalars align to their largest member, which the
+    // derived default (next power of two) would get wrong.
+    #[derive(AsStd430)]
+    #[repr(C)]
+    struct Inner {
+        a: f32,
+        b: f32,
+    }
+
+    #[crevice::std430]
+    struct Outer {
+        #[crevice(size = 8, align = 4)]
+        inner: Inner,
+        #[crevice(size = 4)]
+        x: f32,
+    }
+
+    assert_std430!((size = 12, align = 4) Outer {
+        inner: 0,
+        x: 8,
+    });
+}
+
+#[test]
+fn sorted_fields_remove_padding_std430() {
+    #[crevice::std430(sort)]
+    struct Repacked {
+        a: f32,
+        #[crevice(size = 8)]
+        b: Vector2<f32>,
+        c: f32,
+        #[crevice(size = 8)]
+        d: Vector2<f32>,
+    }
+
+    // Sorted by descending alignment: b, d, a, c.
+    assert_std430!((size = 24, align = 8) Repacked {
+        b: 0,
+        d: 8,
+        a: 16,
+        c: 20,
+    });
+}
+
+#[test]
+fn sorted_fields_keep_std140_layout_valid() {
+    #[crevice::std140(sort)]
+    struct Repacked {
+        a: f32,
+        #[crevice(size = 8)]
+        b: Vector2<f32>,
+    }
+
+    assert_std140!((size = 16, align = 16) Repacked {
+        b: 0,
+        a: 8,
+    });
+}
+
+#[test]
+fn sorted_fields_with_manual_sizes() {
+    #[derive(AsStd140)]
+    struct Inner {
+        a: f32,
+        b: f32,
+    }
+
+    #[crevice::std140(sort)]
+    struct Mixed {
+        x: f32,
+        #[crevice(size = 16)]
+        inner: Inner,
+    }
+
+    assert_std140!((size = 32, align = 16) Mixed {
+        inner: 0,
+        x: 16,
+    });
+}
+
+#[test]
+fn derive_accepts_manual_field_sizes() {
+    #[derive(AsStd140)]
+    struct Inner {
+        a: f32,
+        b: f32,
+    }
+
+    #[derive(AsStd140)]
+    struct Outer {
+        #[crevice(size = 16)]
+        inner: Inner,
+        x: f32,
+    }
+
+    assert_std140!((size = 32, align = 16) Outer {
+        inner: 0,
+        x: 16,
+    });
+}
+
+#[test]
+fn attribute_macro_preserves_other_attributes() {
+    #[crevice::std140]
+    #[derive(Debug, Clone, PartialEq)]
+    struct WithDerives {
+        x: f32,
+    }
+
+    let value = WithDerives { x: 1.0 };
+    assert_eq!(value.clone(), value);
+
+    assert_std140!((size = 16, align = 16) WithDerives {
+        x: 0,
+    });
+}
