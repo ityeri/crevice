@@ -167,6 +167,8 @@ pub mod glsl;
 pub mod std140;
 pub mod std430;
 
+pub use crevice_derive::{std140, std430};
+
 #[doc(hidden)]
 pub mod internal;
 

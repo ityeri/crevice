@@ -1,6 +1,8 @@
 # Crevice Changelog
 
 ## Unreleased Changes
+* Added `#[crevice(size = ..)]` / `#[crevice(size = .., align = ..)]` field markers. They give the macros the layout of a field at expansion time and are re-checked with compile-time assertions.
+* Added `#[crevice::std140]` and `#[crevice::std430]` attribute macros, which replace the derives and accept a `sort` option that lays fields out by descending alignment.
 
 ## [0.20.1] - 2026-06-29
 * Fixed version references
