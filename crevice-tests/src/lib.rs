@@ -534,3 +534,121 @@ fn attribute_macro_preserves_other_attributes() {
         x: 0,
     });
 }
+
+/// Minimal std140 type with a 2-byte size, used to exercise scalar padding on
+/// offsets that are not a multiple of four.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Half(u16);
+
+unsafe impl bytemuck::Zeroable for Half {}
+unsafe impl bytemuck::Pod for Half {}
+unsafe impl crevice::std140::Std140 for Half {
+    const ALIGNMENT: usize = 2;
+}
+
+#[test]
+fn scalar_padding_matches_array_padding() {
+    #[derive(AsStd140)]
+    struct Inner {
+        a: f32,
+        b: f32,
+    }
+
+    #[crevice::std140]
+    struct ArrayPadded {
+        resolution: Vector2<f32>,
+        #[crevice(size = 16)]
+        inner: Inner,
+    }
+
+    #[crevice::std140(pad = u16)]
+    struct ScalarPadded {
+        #[crevice(size = 8)]
+        resolution: Vector2<f32>,
+        #[crevice(size = 16)]
+        inner: Inner,
+    }
+
+    assert_std140!((size = 32, align = 16) ScalarPadded {
+        resolution: 0,
+        inner: 16,
+    });
+
+    let array_value = ArrayPadded {
+        resolution: [800.0, 600.0].into(),
+        inner: Inner { a: 1.0, b: 2.0 },
+    }
+    .as_std140();
+
+    let scalar_value = ScalarPadded {
+        resolution: [800.0, 600.0].into(),
+        inner: Inner { a: 1.0, b: 2.0 },
+    }
+    .as_std140();
+
+    assert_eq!(
+        std::mem::size_of_val(&array_value),
+        std::mem::size_of_val(&scalar_value)
+    );
+    assert_eq!(array_value.as_bytes(), scalar_value.as_bytes());
+}
+
+#[test]
+fn scalar_padding_u16_on_two_byte_offsets() {
+    #[crevice::std140(pad = u16)]
+    struct TwoByteFirst {
+        #[crevice(size = 2, align = 2)]
+        half: Half,
+        #[crevice(size = 4)]
+        x: f32,
+    }
+
+    // half at 0..2, one u16 pad at 2, x at 4..8, four u16 pads to 16.
+    assert_std140!((size = 16, align = 16) TwoByteFirst {
+        half: 0,
+        x: 4,
+    });
+}
+
+#[test]
+fn scalar_padding_accepts_string_types() {
+    #[derive(AsStd140)]
+    struct Inner {
+        a: f32,
+        b: f32,
+    }
+
+    #[crevice::std140(pad = "u32")]
+    struct StrForm {
+        #[crevice(size = 16)]
+        inner: Inner,
+        #[crevice(size = 4)]
+        x: f32,
+    }
+
+    assert_std140!((size = 32, align = 16) StrForm {
+        inner: 0,
+        x: 16,
+    });
+}
+
+#[test]
+fn scalar_padding_with_sort() {
+    #[crevice::std430(sort, pad = f32)]
+    struct Repacked {
+        a: f32,
+        #[crevice(size = 8)]
+        b: Vector2<f32>,
+        c: f32,
+        #[crevice(size = 8)]
+        d: Vector2<f32>,
+    }
+
+    assert_std430!((size = 24, align = 8) Repacked {
+        b: 0,
+        d: 8,
+        a: 16,
+        c: 20,
+    });
+}
