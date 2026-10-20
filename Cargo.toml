@@ -39,3 +39,6 @@ insta = "1.21.0"
 
 [package.metadata."docs.rs"]
 all-features = true
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_arch, values("spirv"))'] }

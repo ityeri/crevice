@@ -39,11 +39,11 @@ impl AsStd430 for bool {
 macro_rules! vectors {
     (
         $(
-            #[$doc:meta] align($align:literal) $glsl_name:ident $name:ident <$prim:ident> ($($field:ident),+)
+            $(#[$attr:meta])* align($align:literal) $glsl_name:ident $name:ident <$prim:ident> ($($field:ident),+)
         )+
     ) => {
         $(
-            #[$doc]
+            $(#[$attr])*
             #[allow(missing_docs)]
             #[derive(Debug, Clone, Copy)]
             #[repr(C)]
@@ -65,25 +65,39 @@ macro_rules! vectors {
     };
 }
 
+// Same reasoning as the std140 vectors: keep these as OpTypeVector under rust-gpu
+// rather than OpTypeStruct, so they behave like GLSL vectors in buffer blocks.
 vectors! {
+    #[cfg_attr(target_arch = "spirv", spirv(vector))]
     #[doc = "Corresponds to a GLSL `vec2` in std430 layout."] align(8) vec2 Vec2<f32>(x, y)
+    #[cfg_attr(target_arch = "spirv", spirv(vector))]
     #[doc = "Corresponds to a GLSL `vec3` in std430 layout."] align(16) vec3 Vec3<f32>(x, y, z)
+    #[cfg_attr(target_arch = "spirv", spirv(vector))]
     #[doc = "Corresponds to a GLSL `vec4` in std430 layout."] align(16) vec4 Vec4<f32>(x, y, z, w)
 
+    #[cfg_attr(target_arch = "spirv", spirv(vector))]
     #[doc = "Corresponds to a GLSL `ivec2` in std430 layout."] align(8) ivec2 IVec2<i32>(x, y)
+    #[cfg_attr(target_arch = "spirv", spirv(vector))]
     #[doc = "Corresponds to a GLSL `ivec3` in std430 layout."] align(16) ivec3 IVec3<i32>(x, y, z)
+    #[cfg_attr(target_arch = "spirv", spirv(vector))]
     #[doc = "Corresponds to a GLSL `ivec4` in std430 layout."] align(16) ivec4 IVec4<i32>(x, y, z, w)
 
+    #[cfg_attr(target_arch = "spirv", spirv(vector))]
     #[doc = "Corresponds to a GLSL `uvec2` in std430 layout."] align(8) uvec2 UVec2<u32>(x, y)
+    #[cfg_attr(target_arch = "spirv", spirv(vector))]
     #[doc = "Corresponds to a GLSL `uvec3` in std430 layout."] align(16) uvec3 UVec3<u32>(x, y, z)
+    #[cfg_attr(target_arch = "spirv", spirv(vector))]
     #[doc = "Corresponds to a GLSL `uvec4` in std430 layout."] align(16) uvec4 UVec4<u32>(x, y, z, w)
 
     #[doc = "Corresponds to a GLSL `bvec2` in std430 layout."] align(8) bvec2 BVec2<Bool>(x, y)
     #[doc = "Corresponds to a GLSL `bvec3` in std430 layout."] align(16) bvec3 BVec3<Bool>(x, y, z)
     #[doc = "Corresponds to a GLSL `bvec4` in std430 layout."] align(16) bvec4 BVec4<Bool>(x, y, z, w)
 
+    #[cfg_attr(target_arch = "spirv", spirv(vector))]
     #[doc = "Corresponds to a GLSL `dvec2` in std430 layout."] align(16) dvec2 DVec2<f64>(x, y)
+    #[cfg_attr(target_arch = "spirv", spirv(vector))]
     #[doc = "Corresponds to a GLSL `dvec3` in std430 layout."] align(32) dvec3 DVec3<f64>(x, y, z)
+    #[cfg_attr(target_arch = "spirv", spirv(vector))]
     #[doc = "Corresponds to a GLSL `dvec4` in std430 layout."] align(32) dvec4 DVec4<f64>(x, y, z, w)
 }
 
